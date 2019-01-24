@@ -4,48 +4,13 @@
 #include <rapidjson/istreamwrapper.h>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
-#include <staticjson/staticjson.hpp>
 #include <iostream>
 #include <fstream>
 #include <cstdio>
 #include <vector>
 #include <functional>
+#include <map>
 #include <windows.h>
-
-using duint = size_t;
-
-struct AddrInfo
-{
-    duint modhash;
-    duint addr;
-    bool manual;
-
-    std::string mod() const
-    {
-        return std::to_string(modhash);
-    }
-};
-
-typedef enum
-{
-    XREF_NONE,
-    XREF_DATA,
-    XREF_JMP,
-    XREF_CALL
-} XREFTYPE;
-
-typedef struct
-{
-    duint addr;
-    XREFTYPE type;
-} XREF_RECORD;
-
-
-struct XREFSINFO : AddrInfo
-{
-    XREFTYPE type;
-    std::unordered_map<duint, XREF_RECORD> references;
-};
 
 using namespace rapidjson;
 using namespace std;
@@ -88,16 +53,24 @@ class SaxHandler : public BaseReaderHandler<UTF8<>, SaxHandler>
     int objectNesting = 0;
     int arrayNesting = 0;
     Document element;
+    Document document;
 
 public:
-    bool Null() { return inArray ? element.Null() : true; }
-    bool Bool(bool b) { return inArray ? element.Bool(b) : true; }
-    bool Int(int i) { return inArray ? element.Int(i) : true; }
-    bool Uint(unsigned u) { return inArray ? element.Uint(u) : true; }
-    bool Int64(int64_t i) { return inArray ? element.Int64(i) : true; }
-    bool Uint64(uint64_t u) { return inArray ? element.Uint64(u) : true; }
-    bool Double(double d) { return inArray ? element.Double(d) : true; }
-    bool String(const char* str, SizeType length, bool copy) { return inArray ? element.String(str, length, copy) : true; }
+    std::string doc()
+    {
+        auto g = [](Document&) { return true; };
+        document.Populate(g);
+        return serialize(document);
+    }
+
+    bool Null() { return inArray ? element.Null() : document.Null(); }
+    bool Bool(bool b) { return inArray ? element.Bool(b) : document.Bool(b); }
+    bool Int(int i) { return inArray ? element.Int(i) : document.Int(i); }
+    bool Uint(unsigned u) { return inArray ? element.Uint(u) : document.Uint(u); }
+    bool Int64(int64_t i) { return inArray ? element.Int64(i) : document.Int64(i); }
+    bool Uint64(uint64_t u) { return inArray ? element.Uint64(u) : document.Uint64(u); }
+    bool Double(double d) { return inArray ? element.Double(d) : document.Double(d); }
+    bool String(const char* str, SizeType length, bool copy) { return inArray ? element.String(str, length, copy) : document.String(str, length, copy); }
 
     bool Key(const char* str, SizeType length, bool copy)
     {
@@ -112,13 +85,13 @@ public:
             else
                 collector = nullptr;
         }
-        return true;
+        return document.Key(str, length, copy);
     }
 
     bool StartObject()
     {
         objectNesting++;
-        return inArray ? element.StartObject() : true;
+        return inArray ? element.StartObject() : document.StartObject();
     }
 
     bool EndObject(SizeType memberCount)
@@ -140,7 +113,7 @@ public:
             }
             return false;
         }
-        return true;
+        return document.EndObject(memberCount);
     }
 
     bool StartArray()
@@ -150,15 +123,18 @@ public:
             return element.StartArray();
         if(objectNesting == 1 && arrayNesting == 1 && collector != nullptr)
             inArray = true;
-        return true;
+        return document.StartArray();
     }
 
     bool EndArray(SizeType elementCount)
     {
-        if(arrayNesting == 1 && objectNesting == 1)
+        if(inArray && arrayNesting == 1 && objectNesting == 1)
+        {
             inArray = false;
+            elementCount = 0;
+        }
         arrayNesting--;
-        return inArray ? element.EndArray(elementCount) : true;
+        return inArray ? element.EndArray(elementCount) : document.EndArray(elementCount);
     }
 
     void SetArrayCollector(const std::string& key, ArrayElementCollector* collector)
@@ -196,7 +172,7 @@ void readfile(const char* f)
     auto h = CreateFileA(f, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
     vector<unsigned char> v(GetFileSize(h, nullptr));
     DWORD r = 0;
-    ReadFile(h, v.data(), v.size(), &r, nullptr);
+    ReadFile(h, v.data(), (DWORD)v.size(), &r, nullptr);
     CloseHandle(h);
 }
 
@@ -216,20 +192,60 @@ struct XrefsCollector : ArrayElementCollector
     }
 } xrefs;
 
+#define QT_TRANSLATE_NOOP(ctx, str) str
+
+static const char* GetParseErrorString(ParseErrorCode code)
+{
+    switch(code)
+    {
+    case kParseErrorDocumentEmpty: return QT_TRANSLATE_NOOP("DBG", "The document is empty.");
+    case kParseErrorDocumentRootNotSingular: return QT_TRANSLATE_NOOP("DBG", "The document root must not be followed by other values.");
+    case kParseErrorValueInvalid: return QT_TRANSLATE_NOOP("DBG", "Invalid value.");
+    case kParseErrorObjectMissName: return QT_TRANSLATE_NOOP("DBG", "Missing a name for object member.");
+    case kParseErrorObjectMissColon: return QT_TRANSLATE_NOOP("DBG", "Missing a colon after a name of object member.");
+    case kParseErrorObjectMissCommaOrCurlyBracket: return QT_TRANSLATE_NOOP("DBG", "Missing a comma or '}' after an object member.");
+    case kParseErrorArrayMissCommaOrSquareBracket: return QT_TRANSLATE_NOOP("DBG", "Missing a comma or ']' after an array element.");
+    case kParseErrorStringUnicodeEscapeInvalidHex: return QT_TRANSLATE_NOOP("DBG", "Incorrect hex digit after \\u escape in string.");
+    case kParseErrorStringUnicodeSurrogateInvalid: return QT_TRANSLATE_NOOP("DBG", "The surrogate pair in string is invalid.");
+    case kParseErrorStringEscapeInvalid: return QT_TRANSLATE_NOOP("DBG", "Invalid escape character in string.");
+    case kParseErrorStringMissQuotationMark: return QT_TRANSLATE_NOOP("DBG", "Missing a closing quotation mark in string.");
+    case kParseErrorStringInvalidEncoding: return QT_TRANSLATE_NOOP("DBG", "Invalid encoding in string.");
+    case kParseErrorNumberTooBig: return QT_TRANSLATE_NOOP("DBG", "Number too big to be stored in double.");
+    case kParseErrorNumberMissFraction: return QT_TRANSLATE_NOOP("DBG", "Miss fraction part in number.");
+    case kParseErrorNumberMissExponent: return QT_TRANSLATE_NOOP("DBG", "Miss exponent in number.");
+    case kParseErrorTermination: return QT_TRANSLATE_NOOP("DBG", "Parsing was terminated.");
+    case kParseErrorUnspecificSyntaxError: return QT_TRANSLATE_NOOP("DBG", "Unspecific syntax error.");
+    default: return "";
+    }
+}
+
 int main(int argc, char* argv[])
 {
     if(argc < 2)
         return 1;
     //readfile(argv[1]);
     {
-        Stopwatch t;
         SaxHandler handler;
-        handler.SetArrayCollector("xrefs", &xrefs);
-        Reader reader;
-        ifstream s = ifstream(argv[1]);
-        vector<char> sbuf(1024 * 1024 * 1);
-        IStreamWrapper ss(s, sbuf.data(), sbuf.size());
-        reader.Parse(ss, handler);
+        {
+            Stopwatch t;
+            handler.SetArrayCollector("xrefs", &xrefs);
+            Reader reader;
+            FILE* fp;
+            fopen_s(&fp, argv[1], "rb");
+            vector<char> sbuf(1024 * 1024);
+            FileReadStream ss(fp, sbuf.data(), sbuf.size());
+            ParseResult parseResult = reader.Parse(ss, handler);
+            fclose(fp);
+            if(!parseResult)
+            {
+                fprintf(stderr, "JSON parse error: %s Offset: %u\n",
+                    GetParseErrorString(parseResult.Code()),
+                    parseResult.Offset());
+                return EXIT_FAILURE;
+            }
+        }
+        fprintf(stderr, "%s\n", handler.doc().c_str());
     }
     puts(serialize(xrefs.xrefs).c_str());
+    return EXIT_SUCCESS;
 }

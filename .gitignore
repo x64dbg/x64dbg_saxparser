@@ -3,3 +3,6 @@ Debug/
 Release/
 x64/
 *.vcxproj.user
+*.opensdf
+*.sdf
+*.suo
